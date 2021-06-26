@@ -26,9 +26,9 @@ var TrimCommand = cli.Command{
 			return cli.Exit("please provide page id", 1)
 		}
 
-		client := notion.NewClient(c.String("token"))
+		n := notion.NewClient(c.String("token"))
 
-		page, err := client.FindPageByID(context.Background(), c.Args().First())
+		page, err := n.FindPageByID(context.Background(), c.Args().First())
 		if err != nil {
 			return cli.Exit(err, 2)
 		}
@@ -36,24 +36,70 @@ var TrimCommand = cli.Command{
 		if c.Bool("recursive") {
 			fmt.Fprintf(c.App.Writer, "trimming page titles recursively, any errors will not lead to non-zero exit code\n")
 
-			var errs []error
-			errs = append(errs, trimPageTitle(c, client, page))
-
-			// here I need to fetch child pages, but not sure if it's possible
-
-			for _, err := range errs {
+			for _, err := range trimPageTitlesRecursively(c, n, []notion.Page{page}) {
 				if err != nil {
 					fmt.Fprintf(c.App.ErrWriter, "error trimming page %s: %s\n", page.ID, err)
 				}
 			}
 		} else {
-			if err := trimPageTitle(c, client, page); err != nil {
+			if err := trimPageTitle(c, n, page); err != nil {
 				return cli.Exit(err, 2)
 			}
 		}
 
 		return nil
 	},
+}
+
+func trimPageTitlesRecursively(c *cli.Context, n *notion.Client, pages []notion.Page) []error {
+	var errs []error
+	var nextLevelPages []notion.Page
+
+	for {
+		if len(pages) < 1 {
+			break
+		}
+
+		for _, page := range pages {
+			if err := trimPageTitle(c, n, page); err != nil {
+				errs = append(errs, err)
+			}
+
+			nextLevelQuery := &notion.PaginationQuery{}
+			for {
+				// not sure if this is the right way to fetch child pages, but Notion API is weird
+				children, err := n.FindBlockChildrenByID(context.Background(), page.ID, nextLevelQuery)
+				if err != nil {
+					errs = append(errs, err)
+					break
+				}
+
+				for _, child := range children.Results {
+					if child.Type != notion.BlockTypeChildPage {
+						continue
+					}
+					childPage, err := n.FindPageByID(context.Background(), child.ID)
+					if err != nil {
+						errs = append(errs, err)
+					} else {
+						nextLevelPages = append(nextLevelPages, childPage)
+					}
+				}
+
+				if children.HasMore {
+					nextLevelQuery.StartCursor = *children.NextCursor
+					continue
+				}
+
+				break
+			}
+		}
+
+		pages = nextLevelPages
+		nextLevelPages = []notion.Page{}
+	}
+
+	return errs
 }
 
 func trimPageTitle(c *cli.Context, client *notion.Client, page notion.Page) error {
@@ -98,7 +144,7 @@ func renderRichTextAsPlain(richText []notion.RichText) string {
 	plainText := strings.Builder{}
 
 	for i, part := range richText {
-		plainText.WriteString(part.Text.Content)
+		plainText.WriteString(part.PlainText)
 		if i < len(richText)-1 {
 			plainText.WriteRune('•')
 		}
